@@ -1,0 +1,3 @@
+discord.py 
+meta-ai-api 
+python-dotenv

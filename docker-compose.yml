@@ -1,0 +1,17 @@
+# docker-compose.yml
+
+version: '3.8'
+
+services:
+  bot:
+    # Tells Docker Compose to build the image from the Dockerfile in the current directory.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Restarts the container automatically if it exits, unless manually stopped.
+    # This is essential for keeping the bot online on a host.
+    restart: unless-stopped
+    # Loads environment variables from a .env file in the same directory.
+    # This keeps your secrets (like DISCORD_TOKEN) out of version control.
+    env_file:
+      - .env
