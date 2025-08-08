@@ -1,10 +1,4 @@
-# bot.py
-
-# =================================================================================
-# I. SETUP & IMPORTS
-# All necessary libraries and initial configuration.
-# =================================================================================
-
+ 
 import discord
 from discord.ext import commands, tasks
 
@@ -14,18 +8,19 @@ import asyncio
 import time
 import traceback
 from typing import Dict, Any, AsyncGenerator, Optional, List, Generator
+from collections import deque
 
 from meta_ai_api import MetaAI
 from dotenv import load_dotenv
 
-# Assume this function exists in a separate file as per the original context.
+
 from custom_prompt import create_gama_instance, curses
 
 
 def setup_logging():
 	"""Configures logging for the application."""
-	# In Docker, logging to stdout/stderr is standard practice.
-	# The container's logging driver will handle output.
+	
+	
 	logging.basicConfig(
 		level=logging.INFO,
 		format="%(asctime)s [%(levelname)s] %(message)s",
@@ -35,10 +30,10 @@ def setup_logging():
 	)
 
 
-# =================================================================================
-# II. CONFIGURATION & UTILITIES
-# Static classes for storing constants and helper methods.
-# =================================================================================
+
+
+
+
 
 class BotConfig:
 	"""Stores bot constants."""
@@ -46,8 +41,11 @@ class BotConfig:
 	UPDATE_INTERVAL_SECONDS = 0.7
 	AI_INACTIVITY_THRESHOLD = 15 * 60
 	AI_MAX_ERRORS = 3
-	AI_SORRY_PHRASE = "Sorry, I can’t help you" # Add for logic
-	AI_MAX_SORRY_RESPONSES = 3 # Add for logic
+	AI_SORRY_PHRASE = "Sorry, I can’t help you" 
+	AI_MAX_SORRY_RESPONSES = 3 
+	REQUEST_LIMIT_PER_MINUTE = 8
+	RATE_LIMIT_COOLDOWN_SECONDS = 15
+	RATE_LIMIT_MESSAGE = "hey hey, are you trolling me? Give me a second to chill out and try again."
 
 
 class CustomPrompts:
@@ -76,18 +74,13 @@ class CustomPrompts:
 						"""
 
 
-# =================================================================================
-# III. AI SESSION MANAGEMENT
-# Handles the lifecycle of the Meta AI session.
-# =================================================================================
-
 class MetaAIManager:
 	"""Manages MetaAI session."""
 	def __init__(self, inactivity_threshold: int, max_errors: int):
 		self.ai_instance: Optional[MetaAI] = None
 		self.lock = asyncio.Lock()
 		self.error_count = 0
-		self.sorry_response_count = 0 # Add for logic
+		self.sorry_response_count = 0 
 		self.max_errors = max_errors
 		self.last_activity_time: float = time.time()
 		self.inactivity_threshold = inactivity_threshold
@@ -103,8 +96,8 @@ class MetaAIManager:
 			try:
 				if os.getenv("DOCKER_ENV"):
 					logging.info("Docker env detected. Using no-sandbox args.")
-					# For running headless browser in Docker
-				# Pass args to instance creator
+					
+				
 				self.ai_instance = await asyncio.to_thread(
 					create_gama_instance)
 				if not self.ai_instance:
@@ -121,7 +114,7 @@ class MetaAIManager:
 
 				logging.info("Meta AI session started successfully.")
 				self.error_count = 0
-				self.sorry_response_count = 0 # Reset counter
+				self.sorry_response_count = 0 
 				self.last_activity_time = time.time()
 				return True
 			except Exception as e:
@@ -193,10 +186,10 @@ class MetaAIManager:
 			traceback.print_exception(type(e), e, e.__traceback__)
 
 
-# =================================================================================
-# IV. DISCORD MESSAGE HANDLING
-# Logic for processing and responding to a specific Discord message.
-# =================================================================================
+
+
+
+
 
 class DiscordMessageHandler:
 	"""Handles a bot response."""
@@ -277,14 +270,14 @@ class DiscordMessageHandler:
 					new_prompt_parts = []
 					current_word = ""
 
-					# Tokenize prompt
+					
 					for char in self.prompt:
 						if char.isalpha():
 							current_word += char
 						else:
-							# Boundary found
+							
 							if current_word:
-								# Check word
+								
 								if current_word.lower() in curse_set and len(current_word) > 2:
 									censored = current_word[:2] + '-' * (len(current_word) - 2)
 									new_prompt_parts.append(censored)
@@ -293,7 +286,7 @@ class DiscordMessageHandler:
 								current_word = ""
 							new_prompt_parts.append(char)
 					
-					# Handle last word
+					
 					if current_word:
 						if current_word.lower() in curse_set and len(current_word) > 2:
 							censored = current_word[:2] + '-' * (len(current_word) - 2)
@@ -304,7 +297,7 @@ class DiscordMessageHandler:
 					self.prompt = "".join(new_prompt_parts)
 
 			
-    
+ 
 			self.bot_message = await self.message.channel.send("😈 Thinking...", reference=self.message)
 			stream = self.bot.ai_manager.get_response_stream(
 				CustomPrompts.format_user_prompt(self.prompt)
@@ -337,10 +330,10 @@ class DiscordMessageHandler:
 					logging.error(f"Failed to edit error message: {de}")
 
 
-# =================================================================================
-# V. DISCORD BOT DEFINITION
-# The main bot class, event listeners, and commands.
-# =================================================================================
+
+
+
+
 
 class MetaDiscordBot(commands.Bot):
 	"""The Discord Bot class."""
@@ -349,6 +342,8 @@ class MetaDiscordBot(commands.Bot):
 		intents.message_content = True
 		super().__init__(command_prefix="!", intents=intents)
 		self.ai_manager = ai_manager
+		self.request_timestamps: deque[float] = deque() # rate limit
+		self.cooldown_until: float = 0.0 # rate limit
 
 	async def setup_hook(self) -> None:
 		"""Runs on bot setup."""
@@ -379,6 +374,36 @@ class MetaDiscordBot(commands.Bot):
 
 		if not self._should_process_message(message):
 			return
+
+		now = time.time()
+		
+		# check cooldown
+		if now < self.cooldown_until:
+			self.cooldown_until = now + BotConfig.RATE_LIMIT_COOLDOWN_SECONDS # reset timer
+			await message.channel.send(
+				BotConfig.RATE_LIMIT_MESSAGE,
+				reference=message,
+				delete_after=15
+			)
+			return
+
+		# prune old reqs
+		one_minute_ago = now - 60
+		while self.request_timestamps and self.request_timestamps[0] < one_minute_ago:
+			self.request_timestamps.popleft()
+		
+		# check limit
+		if len(self.request_timestamps) >= BotConfig.REQUEST_LIMIT_PER_MINUTE:
+			logging.warning("Rate limit hit. Triggering cooldown.")
+			self.cooldown_until = now + BotConfig.RATE_LIMIT_COOLDOWN_SECONDS # start timer
+			await message.channel.send(
+				BotConfig.RATE_LIMIT_MESSAGE,
+				reference=message,
+				delete_after=15
+			)
+			return
+		
+		self.request_timestamps.append(now) # track request
 
 		prompt = message.content.replace(f"<@{self.user.id}>", "").strip()
 		if not prompt:
@@ -414,10 +439,10 @@ class MetaDiscordBot(commands.Bot):
 			pass
 
 
-# =================================================================================
-# VI. APPLICATION ENTRY POINT
-# Initializes and runs the bot.
-# =================================================================================
+
+
+
+
 
 def main():
 	"""Main function to run the bot."""
